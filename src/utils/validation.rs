@@ -8,14 +8,12 @@ impl Validator {
         if email.is_empty() {
             return Err("Email is required".to_string());
         }
-        
+
         if email.len() > 250 {
             return Err("Email is too long".to_string());
         }
 
-        let email_regex = Regex::new(
-            r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        ).unwrap();
+        let email_regex = Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
 
         if !email_regex.is_match(email) {
             return Err("Email is invalid".to_string());
@@ -25,7 +23,6 @@ impl Validator {
     }
 
     /// Validate password
-    /// Must have: 1 uppercase, 1 lowercase, 1 number, 1 special char, 6-20 chars, no spaces
     pub fn validate_password(password: &str) -> Result<(), String> {
         if password.is_empty() {
             return Err("Password is required".to_string());
@@ -121,18 +118,50 @@ impl Validator {
 
     /// Validate image file type from filename
     pub fn validate_image_type(filename: &str) -> Result<(), String> {
-        let allowed_extensions = ["jpg", "jpeg", "png"];
-        
-        let extension = filename
-            .split('.')
-            .last()
-            .unwrap_or("")
-            .to_lowercase();
+        let allowed_extensions = ["jpg", "jpeg", "png", "webp"];
+
+        let extension = filename.split('.').last().unwrap_or("").to_lowercase();
 
         if !allowed_extensions.contains(&extension.as_str()) {
-            return Err("Image type must be jpeg, jpg or png".to_string());
+            return Err("Image type must be jpeg, jpg,webp or png ".to_string());
         }
 
         Ok(())
     }
+
+    
+    pub fn validate_post_name(name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("Name is required".into());
+        }
+        if name.len() < 2 || name.len() > 100 {
+            return Err("Name length must be between 2 and 100 characters".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_post_description(desc: &str) -> Result<(), String> {
+        if desc.trim().is_empty() {
+            return Err("Description is required".into());
+        }
+        if desc.len() < 3 || desc.len() > 500 {
+            return Err("Description length must be between 3 and 500 characters".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_post_images(filenames: &[String]) -> Result<(), String> {
+        if filenames.is_empty() {
+            return Err("At least one image is required".into());
+        }
+        for filename in filenames {
+            Self::validate_image_type(filename)?;
+        }
+        Ok(())
+    }
+
+
+    
 }
+
+
