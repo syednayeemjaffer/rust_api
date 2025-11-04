@@ -20,7 +20,7 @@ pub fn user_routes(cfg: &mut web::ServiceConfig) {
                 .route("/allPost", web::get().to(get_all_posts))
                 .route("/post/{id}", web::get().to(get_post_by_id))
                 .route("/deletePost/{id}", web::delete().to(delete_post))
-                .route("/post/{id}", web::put().to(update_post))
-                .route("/changePassword/{id}", web::post().to(change_password)),
+                .route("/updatePost/{id}", web::put().to(update_post))
+                .route("/changePassword/{id}", web::put().to(change_password)),
         );
 }

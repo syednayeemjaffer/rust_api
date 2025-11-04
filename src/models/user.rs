@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 use diesel::{Queryable, Insertable};
 use serde::{Deserialize, Serialize};
 
-use crate::schema::users;
+use crate::schema::{posts, users};
 
 #[derive(Queryable, Serialize)]
 pub struct User {
@@ -26,4 +26,13 @@ pub struct NewUser {
     pub lastname: String,
     pub ph: String,
     pub password: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = posts)]
+pub struct NewPost {
+    pub userid: i64,
+    pub name: String,
+    pub description: String,
+    pub imgs: Vec<Option<String>>,
 }

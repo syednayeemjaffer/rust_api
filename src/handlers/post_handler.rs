@@ -1,15 +1,15 @@
 use actix_multipart::Multipart;
-use actix_web::{web, HttpRequest, HttpResponse, HttpMessage, Responder};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, web};
 use diesel::prelude::*;
 use futures_util::TryStreamExt as _;
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 use crate::{
     db::Pool,
     schema::{posts, users},
-    utils::{img_upload::save_multiple_images, validation::Validator},
     utils::auth::Claims,
+    utils::{img_upload::save_multiple_images, validation::Validator},
 };
 
 #[derive(Serialize)]
@@ -106,7 +106,8 @@ pub async fn upload_post(
     let saved_filenames = match save_multiple_images(files) {
         Ok(v) => v,
         Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({"status": false, "message": e}));
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"status": false, "message": e}));
         }
     };
 
@@ -149,12 +150,19 @@ pub async fn upload_post(
     }
 }
 
+
 pub async fn get_all_posts(
     pool: web::Data<Pool>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> impl Responder {
-    let page = query.get("page").and_then(|p| p.parse::<i64>().ok()).unwrap_or(1);
-    let limit = query.get("limit").and_then(|l| l.parse::<i64>().ok()).unwrap_or(3);
+    let page = query
+        .get("page")
+        .and_then(|p| p.parse::<i64>().ok())
+        .unwrap_or(1);
+    let limit = query
+        .get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(3);
     let offset = (page - 1) * limit;
 
     let mut conn = pool.get().expect("DB connection error");
@@ -178,25 +186,44 @@ pub async fn get_all_posts(
         ));
 
     let results = joined_query
-        .load::<(i32, i64, String, String, String, String, String, Vec<Option<String>>, String, Option<chrono::NaiveDateTime>)>(&mut conn)
+        .load::<(
+            i32,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Vec<Option<String>>,
+            String,
+            Option<chrono::NaiveDateTime>,
+        )>(&mut conn)
         .unwrap_or_default();
 
-    let posts_json = results.into_iter().map(|(pid, userid, fname, lname, email, profile, name, imgs, desc, created_at)| {
-        serde_json::json!({
-            "id": pid,
-            "user_id": userid,
-            "firstname": fname,
-            "lastname": lname,
-            "email": email,
-            "profile": profile,
-            "name": name,
-            "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<_>>(),
-            "description": desc,
-            "created_at": created_at,
-        })
-    }).collect();
+    let posts_json = results
+        .into_iter()
+        .map(
+            |(pid, userid, fname, lname, email, profile, name, imgs, desc, created_at)| {
+                serde_json::json!({
+                    "id": pid,
+                    "user_id": userid,
+                    "firstname": fname,
+                    "lastname": lname,
+                    "email": email,
+                    "profile": profile,
+                    "name": name,
+                    "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<_>>(),
+                    "description": desc,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect();
 
-    let total_count = posts::table.count().get_result::<i64>(&mut conn).unwrap_or(0);
+    let total_count = posts::table
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
 
     HttpResponse::Ok().json(PostsListResponse {
         status: true,
@@ -206,16 +233,20 @@ pub async fn get_all_posts(
 }
 
 // Get one post by id
-pub async fn get_post_by_id(
-    pool: web::Data<Pool>,
-    path: web::Path<i32>,
-) -> impl Responder {
+pub async fn get_post_by_id(pool: web::Data<Pool>, path: web::Path<i32>) -> impl Responder {
     let post_id = path.into_inner();
     let mut conn = pool.get().expect("DB connection error");
 
     let post_opt = posts::table
         .filter(posts::id.eq(post_id))
-        .first::<(i32, i64, String, String, Vec<Option<String>>, Option<chrono::NaiveDateTime>)>(&mut conn)
+        .first::<(
+            i32,
+            i64,
+            String,
+            String,
+            Vec<Option<String>>,
+            Option<chrono::NaiveDateTime>,
+        )>(&mut conn)
         .optional();
 
     match post_opt {
@@ -245,10 +276,7 @@ pub async fn get_post_by_id(
 }
 
 // Delete post and delete associated images from disk
-pub async fn delete_post(
-    pool: web::Data<Pool>,
-    path: web::Path<i32>,
-) -> impl Responder {
+pub async fn delete_post(pool: web::Data<Pool>, path: web::Path<i32>) -> impl Responder {
     let post_id = path.into_inner();
     let mut conn = pool.get().expect("DB connection error");
 
@@ -271,19 +299,22 @@ pub async fn delete_post(
                 }
             }
         }
-        Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({
-            "status": false,
-            "message": "Post not found"
-        })),
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "status": false,
-            "message": "Database error",
-            "error": e.to_string(),
-        })),
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "status": false,
+                "message": "Post not found"
+            }));
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Database error",
+                "error": e.to_string(),
+            }));
+        }
     }
 
-    let deleted = diesel::delete(posts::table.filter(posts::id.eq(post_id)))
-        .execute(&mut conn);
+    let deleted = diesel::delete(posts::table.filter(posts::id.eq(post_id))).execute(&mut conn);
 
     match deleted {
         Ok(count) if count > 0 => HttpResponse::Ok().json(serde_json::json!({
@@ -302,7 +333,6 @@ pub async fn delete_post(
     }
 }
 
-
 // Updated update_post function for post_handler.rs
 
 pub async fn update_post(
@@ -312,7 +342,7 @@ pub async fn update_post(
     mut payload: Multipart,
 ) -> impl Responder {
     let post_id = path.into_inner();
-    
+
     // Check authentication
     let user_claims = if let Some(claims) = req.extensions().get::<Claims>() {
         claims.clone()
@@ -328,7 +358,13 @@ pub async fn update_post(
     // Get existing post
     let existing_post = posts::table
         .filter(posts::id.eq(post_id))
-        .select((posts::id, posts::userid, posts::name, posts::description, posts::imgs))
+        .select((
+            posts::id,
+            posts::userid,
+            posts::name,
+            posts::description,
+            posts::imgs,
+        ))
         .first::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn)
         .optional();
 
@@ -396,7 +432,10 @@ pub async fn update_post(
             while let Some(chunk) = field.try_next().await.unwrap() {
                 data.extend_from_slice(&chunk);
             }
-            let img_name = String::from_utf8_lossy(&data).to_string().trim().to_string();
+            let img_name = String::from_utf8_lossy(&data)
+                .to_string()
+                .trim()
+                .to_string();
             if !img_name.is_empty() {
                 delete_imgs.push(img_name);
             }
@@ -522,10 +561,7 @@ pub async fn update_post(
         }
     } else if !name_field.is_empty() {
         let result = query_builder
-            .set((
-                posts::name.eq(&name_field),
-                posts::imgs.eq(&current_imgs),
-            ))
+            .set((posts::name.eq(&name_field), posts::imgs.eq(&current_imgs)))
             .returning((
                 posts::id,
                 posts::userid,

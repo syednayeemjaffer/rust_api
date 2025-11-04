@@ -5,6 +5,7 @@ mod routes;
 mod schema;
 mod utils;
 
+use actix_cors::Cors;
 use actix_files as fs;
 use actix_web::{App, HttpServer, web};
 use db::init_pool;
@@ -19,12 +20,19 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .service(
-                fs::Files::new("/profile", "./files/usersProfiles")
-                    .show_files_listing()
+            .wrap(
+                Cors::default()
+                    .allowed_origin("http://localhost:3000")
+                    .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                    .allowed_headers(vec![
+                        actix_web::http::header::AUTHORIZATION,
+                        actix_web::http::header::CONTENT_TYPE,
+                    ])
+                    .max_age(3600),
             )
-            // Wrap all user routes under /api
+            .app_data(web::Data::new(pool.clone()))
+            .service(fs::Files::new("/profile", "./files/usersProfiles").show_files_listing())
+            .service(fs::Files::new("/post", "./files/userPost").show_files_listing())
             .service(web::scope("/api").configure(user_routes))
     })
     .bind(("127.0.0.1", 8000))?

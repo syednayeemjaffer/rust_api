@@ -49,7 +49,7 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
 
     while let Ok(Some(mut field)) = payload.try_next().await {
         let name = field.name().to_string();
-        
+
         if name == "profile" {
             let content_disposition = field.content_disposition();
             let filename = content_disposition
@@ -63,7 +63,7 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
             }
 
             let mut bytes = Vec::new();
-            while let Some(chunk) = field.try_next().await.unwrap() {
+            while let Ok(Some(chunk)) = field.try_next().await {
                 bytes.extend_from_slice(&chunk);
             }
 
@@ -78,7 +78,7 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
             profile_filename = Some(filename);
         } else {
             let mut data: Vec<u8> = Vec::new();
-            while let Some(chunk) = field.try_next().await.unwrap() {
+            while let Ok(Some(chunk)) = field.try_next().await {
                 data.extend_from_slice(&chunk);
             }
             let value = String::from_utf8_lossy(&data).to_string();
@@ -103,6 +103,16 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
             .json(serde_json::json!({"status": false, "message": "All fields are required"}));
     }
 
+    let (image_data, filename) = match (image_bytes, profile_filename) {
+        (Some(bytes), Some(name)) => (bytes, name),
+        _ => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "status": false,
+                "message": "Profile image is required"
+            }));
+        }
+    };
+
     let mut conn = pool.get().expect("DB connection error");
 
     let exists = users::table
@@ -118,16 +128,24 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
         }));
     }
 
-    let saved_filename = match save_profile_image(image_bytes.unwrap(), &profile_filename.unwrap())
-    {
+    let saved_filename = match save_profile_image(image_data, &filename) {
         Ok(name) => name,
         Err(e) => {
+            eprintln!("Failed to save profile image: {}", e);
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"status": false, "message": e}));
         }
     };
 
-    let hashed_pwd = hash(&password_field, DEFAULT_COST).unwrap();
+    let hashed_pwd = match hash(&password_field, DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Failed to hash password: {}", e);
+            return HttpResponse::InternalServerError().json(
+                serde_json::json!({"status": false, "message": "Failed to process password"}),
+            );
+        }
+    };
 
     let new_user = NewUser {
         profile: saved_filename,
@@ -138,18 +156,25 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
         password: hashed_pwd,
     };
 
-    diesel::insert_into(users::table)
+    match diesel::insert_into(users::table)
         .values(&new_user)
         .execute(&mut conn)
-        .expect("Insert failed");
-
-    HttpResponse::Created().json(serde_json::json!({
-        "status": true,
-        "message": "User created successfully"
-    }))
+    {
+        Ok(_) => HttpResponse::Created().json(serde_json::json!({
+            "status": true,
+            "message": "User created successfully"
+        })),
+        Err(e) => {
+            eprintln!("Database insert failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Failed to create user",
+                "error": e.to_string()
+            }))
+        }
+    }
 }
 
-// LOGIN USER 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub email: String,
@@ -349,7 +374,10 @@ pub async fn update_user(
             while let Some(chunk) = field.try_next().await.unwrap() {
                 data.extend_from_slice(&chunk);
             }
-            let value = String::from_utf8_lossy(&data).to_string().trim().to_string();
+            let value = String::from_utf8_lossy(&data)
+                .to_string()
+                .trim()
+                .to_string();
             match name.as_str() {
                 "firstname" => user.firstname = value,
                 "lastname" => user.lastname = value,
@@ -434,8 +462,6 @@ pub async fn update_user(
         "message": "User updated successfully"
     }))
 }
-
-
 
 pub async fn change_password(
     pool: web::Data<Pool>,
@@ -531,4 +557,3 @@ pub async fn change_password(
         })),
     }
 }
-

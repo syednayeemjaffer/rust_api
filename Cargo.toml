@@ -40,3 +40,5 @@ actix-files = "0.6"
 
 jsonwebtoken = "9"
 watch = "0.2.3"
+
+actix-cors = "0.6"
