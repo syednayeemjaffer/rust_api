@@ -2,11 +2,12 @@ use actix_multipart::Multipart;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, web};
 use diesel::prelude::*;
 use futures_util::TryStreamExt as _;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{fs, path::Path};
 
 use crate::{
     db::Pool,
+    models::user::{NewPost, Post, PostData, PostWithUser},
     schema::{posts, users},
     utils::auth::Claims,
     utils::{img_upload::save_multiple_images, validation::Validator},
@@ -16,20 +17,14 @@ use crate::{
 struct PostResponse {
     status: bool,
     message: String,
-    post: Option<serde_json::Value>,
+    post: Option<PostData>,
 }
 
 #[derive(Serialize)]
 struct PostsListResponse {
     status: bool,
-    posts: Vec<serde_json::Value>,
+    posts: Vec<PostWithUser>,
     total_post: i64,
-}
-
-#[derive(Deserialize)]
-pub struct DeleteImgQuery {
-    #[serde(rename = "deleteImg")]
-    delete_img: Option<String>,
 }
 
 pub async fn upload_post(
@@ -111,45 +106,47 @@ pub async fn upload_post(
         }
     };
 
-    let mut conn = pool.get().expect("DB connection error");
     let imgs_db: Vec<Option<String>> = saved_filenames.into_iter().map(Some).collect();
 
-    let inserted = diesel::insert_into(posts::table)
-        .values((
-            posts::userid.eq(user_claims.id),
-            posts::name.eq(name_field),
-            posts::description.eq(description_field),
-            posts::imgs.eq(imgs_db),
-        ))
-        .returning((
-            posts::id,
-            posts::userid,
-            posts::name,
-            posts::description,
-            posts::imgs,
-        ))
-        .get_result::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn);
+    let new_post = NewPost {
+        userid: user_claims.id,
+        name: name_field,
+        description: description_field,
+        imgs: imgs_db,
+    };
 
-    match inserted {
-        Ok((id, userid, name, description, imgs)) => HttpResponse::Created().json(PostResponse {
-            status: true,
-            message: "User post uploaded successfully".to_string(),
-            post: Some(serde_json::json!({
-                "id": id,
-                "user_id": userid,
-                "name": name,
-                "description": description,
-                "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<String>>(),
-            })),
-        }),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "status": false,
-            "message": "Failed to insert post",
-            "error": e.to_string(),
-        })),
+    let mut conn = pool.get().expect("DB connection error");
+
+    match diesel::insert_into(posts::table)
+        .values(&new_post)
+        .get_result::<Post>(&mut conn)
+    {
+        Ok(post) => {
+            let post_data = PostData {
+                id: post.id,
+                userid: post.userid,
+                name: post.name,
+                description: post.description,
+                imgs: post.imgs,
+                created_at: post.created_at,
+            };
+
+            HttpResponse::Created().json(PostResponse {
+                status: true,
+                message: "User post uploaded successfully".to_string(),
+                post: Some(post_data),
+            })
+        }
+        Err(e) => {
+            eprintln!("Database insert failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Failed to insert post",
+                "error": e.to_string()
+            }))
+        }
     }
 }
-
 
 pub async fn get_all_posts(
     pool: web::Data<Pool>,
@@ -167,7 +164,7 @@ pub async fn get_all_posts(
 
     let mut conn = pool.get().expect("DB connection error");
 
-    let joined_query = posts::table
+    let results = posts::table
         .inner_join(users::table.on(posts::userid.eq(users::id)))
         .order(posts::created_at.desc())
         .limit(limit)
@@ -183,9 +180,7 @@ pub async fn get_all_posts(
             posts::imgs,
             posts::description,
             posts::created_at,
-        ));
-
-    let results = joined_query
+        ))
         .load::<(
             i32,
             i64,
@@ -200,22 +195,22 @@ pub async fn get_all_posts(
         )>(&mut conn)
         .unwrap_or_default();
 
-    let posts_json = results
+    let posts_list: Vec<PostWithUser> = results
         .into_iter()
         .map(
             |(pid, userid, fname, lname, email, profile, name, imgs, desc, created_at)| {
-                serde_json::json!({
-                    "id": pid,
-                    "user_id": userid,
-                    "firstname": fname,
-                    "lastname": lname,
-                    "email": email,
-                    "profile": profile,
-                    "name": name,
-                    "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<_>>(),
-                    "description": desc,
-                    "created_at": created_at,
-                })
+                PostWithUser {
+                    id: pid,
+                    user_id: userid,
+                    firstname: fname,
+                    lastname: lname,
+                    email,
+                    profile,
+                    name,
+                    imgs: imgs.into_iter().filter_map(|x| x).collect(),
+                    description: desc,
+                    created_at,
+                }
             },
         )
         .collect();
@@ -227,78 +222,62 @@ pub async fn get_all_posts(
 
     HttpResponse::Ok().json(PostsListResponse {
         status: true,
-        posts: posts_json,
+        posts: posts_list,
         total_post: total_count,
     })
 }
 
-// Get one post by id
 pub async fn get_post_by_id(pool: web::Data<Pool>, path: web::Path<i32>) -> impl Responder {
     let post_id = path.into_inner();
     let mut conn = pool.get().expect("DB connection error");
 
-    let post_opt = posts::table
+    let post_result = posts::table
         .filter(posts::id.eq(post_id))
-        .first::<(
-            i32,
-            i64,
-            String,
-            String,
-            Vec<Option<String>>,
-            Option<chrono::NaiveDateTime>,
-        )>(&mut conn)
+        .first::<Post>(&mut conn)
         .optional();
 
-    match post_opt {
-        Ok(Some((pid, userid, name, description, imgs, created_at))) => {
+    match post_result {
+        Ok(Some(post)) => {
+            let post_data = PostData {
+                id: post.id,
+                userid: post.userid,
+                name: post.name,
+                description: post.description,
+                imgs: post.imgs,
+                created_at: post.created_at,
+            };
+
             HttpResponse::Ok().json(serde_json::json!({
                 "status": true,
-                "post": {
-                    "id": pid,
-                    "user_id": userid,
-                    "name": name,
-                    "description": description,
-                    "imgs": imgs.into_iter().filter_map(|i| i).collect::<Vec<String>>(),
-                    "created_at": created_at,
-                }
+                "post": post_data
             }))
         }
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
             "status": false,
-            "message": "Post not found."
+            "message": "Post not found"
         })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "status": false,
-            "message": "Database error",
-            "error": e.to_string(),
-        })),
+        Err(e) => {
+            eprintln!("Database query failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Database error",
+                "error": e.to_string()
+            }))
+        }
     }
 }
 
-// Delete post and delete associated images from disk
 pub async fn delete_post(pool: web::Data<Pool>, path: web::Path<i32>) -> impl Responder {
     let post_id = path.into_inner();
     let mut conn = pool.get().expect("DB connection error");
 
-    let imgs_opt = posts::table
+    let post_result = posts::table
         .filter(posts::id.eq(post_id))
-        .select(posts::imgs)
-        .first::<Vec<Option<String>>>(&mut conn)
+        .first::<Post>(&mut conn)
         .optional();
 
-    match imgs_opt {
-        Ok(Some(imgs)) => {
-            for img_opt in imgs {
-                if let Some(img) = img_opt {
-                    let file_path = Path::new("files/userPost").join(&img);
-                    if file_path.exists() {
-                        if let Err(e) = fs::remove_file(&file_path) {
-                            eprintln!("Failed to delete post image {}: {}", img, e);
-                        }
-                    }
-                }
-            }
-        }
+    let post = match post_result {
+        Ok(Some(p)) => p,
         Ok(None) => {
             return HttpResponse::NotFound().json(serde_json::json!({
                 "status": false,
@@ -306,34 +285,46 @@ pub async fn delete_post(pool: web::Data<Pool>, path: web::Path<i32>) -> impl Re
             }));
         }
         Err(e) => {
+            eprintln!("Database query failed: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": false,
                 "message": "Database error",
-                "error": e.to_string(),
+                "error": e.to_string()
             }));
+        }
+    };
+
+    // Delete images from disk
+    for img_opt in post.imgs {
+        if let Some(img) = img_opt {
+            let file_path = Path::new("files/userPost").join(&img);
+            if file_path.exists() {
+                if let Err(e) = fs::remove_file(&file_path) {
+                    eprintln!("Failed to delete post image {}: {}", img, e);
+                }
+            }
         }
     }
 
-    let deleted = diesel::delete(posts::table.filter(posts::id.eq(post_id))).execute(&mut conn);
-
-    match deleted {
+    match diesel::delete(posts::table.filter(posts::id.eq(post_id))).execute(&mut conn) {
         Ok(count) if count > 0 => HttpResponse::Ok().json(serde_json::json!({
             "status": true,
-            "message": "Post is deleted"
+            "message": "Post deleted successfully"
         })),
         Ok(_) => HttpResponse::BadRequest().json(serde_json::json!({
             "status": false,
-            "message": "Cannot delete the post."
+            "message": "Cannot delete the post"
         })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "status": false,
-            "message": "Database error",
-            "error": e.to_string(),
-        })),
+        Err(e) => {
+            eprintln!("Database delete failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Database error",
+                "error": e.to_string()
+            }))
+        }
     }
 }
-
-// Updated update_post function for post_handler.rs
 
 pub async fn update_post(
     req: HttpRequest,
@@ -343,7 +334,6 @@ pub async fn update_post(
 ) -> impl Responder {
     let post_id = path.into_inner();
 
-    // Check authentication
     let user_claims = if let Some(claims) = req.extensions().get::<Claims>() {
         claims.clone()
     } else {
@@ -355,21 +345,13 @@ pub async fn update_post(
 
     let mut conn = pool.get().expect("DB connection error");
 
-    // Get existing post
     let existing_post = posts::table
         .filter(posts::id.eq(post_id))
-        .select((
-            posts::id,
-            posts::userid,
-            posts::name,
-            posts::description,
-            posts::imgs,
-        ))
-        .first::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn)
+        .first::<Post>(&mut conn)
         .optional();
 
-    let (_, post_userid, _, _, mut current_imgs) = match existing_post {
-        Ok(Some(post)) => post,
+    let mut post = match existing_post {
+        Ok(Some(p)) => p,
         Ok(None) => {
             return HttpResponse::NotFound().json(serde_json::json!({
                 "status": false,
@@ -377,6 +359,7 @@ pub async fn update_post(
             }));
         }
         Err(e) => {
+            eprintln!("Database query failed: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": false,
                 "message": "Database error",
@@ -385,8 +368,7 @@ pub async fn update_post(
         }
     };
 
-    // Check if user owns the post
-    if post_userid != user_claims.id {
+    if post.userid != user_claims.id {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "status": false,
             "message": "You can only update your own posts"
@@ -398,7 +380,6 @@ pub async fn update_post(
     let mut new_files: Vec<(Vec<u8>, String)> = Vec::new();
     let mut delete_imgs: Vec<String> = Vec::new();
 
-    // Parse multipart data
     while let Ok(Some(mut field)) = payload.try_next().await {
         let field_name = field.name().to_string();
 
@@ -427,7 +408,6 @@ pub async fn update_post(
 
             new_files.push((bytes, filename));
         } else if field_name == "deleteImg" {
-            // Collect images to delete from body
             let mut data = Vec::new();
             while let Some(chunk) = field.try_next().await.unwrap() {
                 data.extend_from_slice(&chunk);
@@ -444,7 +424,10 @@ pub async fn update_post(
             while let Some(chunk) = field.try_next().await.unwrap() {
                 data.extend_from_slice(&chunk);
             }
-            let val = String::from_utf8_lossy(&data).to_string();
+            let val = String::from_utf8_lossy(&data)
+                .to_string()
+                .trim()
+                .to_string();
             match field_name.as_str() {
                 "name" => name_field = val,
                 "description" => description_field = val,
@@ -456,13 +439,10 @@ pub async fn update_post(
     // Handle image deletion
     if !delete_imgs.is_empty() {
         for img_to_delete in &delete_imgs {
-            // Delete from disk
             let file_path = Path::new("files/userPost").join(img_to_delete);
             if file_path.exists() {
                 if let Err(e) = fs::remove_file(&file_path) {
                     eprintln!("Failed to delete image {}: {}", img_to_delete, e);
-                } else {
-                    println!("Successfully deleted: {}", img_to_delete);
                 }
             } else {
                 return HttpResponse::BadRequest().json(serde_json::json!({
@@ -471,8 +451,7 @@ pub async fn update_post(
                 }));
             }
 
-            // Remove from current_imgs array
-            current_imgs.retain(|img_opt| {
+            post.imgs.retain(|img_opt| {
                 if let Some(img) = img_opt {
                     img != img_to_delete
                 } else {
@@ -482,7 +461,7 @@ pub async fn update_post(
         }
     }
 
-    // Validate fields if provided
+    // Update text fields
     if !name_field.is_empty() {
         if let Err(e) = Validator::validate_post_name(&name_field) {
             return HttpResponse::BadRequest().json(serde_json::json!({
@@ -490,6 +469,7 @@ pub async fn update_post(
                 "message": e
             }));
         }
+        post.name = name_field;
     }
 
     if !description_field.is_empty() {
@@ -499,14 +479,15 @@ pub async fn update_post(
                 "message": e
             }));
         }
+        post.description = description_field;
     }
 
-    // Save new images if any
+    // Save new images
     if !new_files.is_empty() {
         match save_multiple_images(new_files) {
             Ok(saved_filenames) => {
                 for filename in saved_filenames {
-                    current_imgs.push(Some(filename));
+                    post.imgs.push(Some(filename));
                 }
             }
             Err(e) => {
@@ -518,152 +499,39 @@ pub async fn update_post(
         }
     }
 
-    // Build update query dynamically
-    let mut query_builder = diesel::update(posts::table.filter(posts::id.eq(post_id)));
+    // Perform update
+    let updated_result = diesel::update(posts::table.filter(posts::id.eq(post_id)))
+        .set((
+            posts::name.eq(&post.name),
+            posts::description.eq(&post.description),
+            posts::imgs.eq(&post.imgs),
+        ))
+        .get_result::<Post>(&mut conn);
 
-    if !name_field.is_empty() && !description_field.is_empty() {
-        let result = query_builder
-            .set((
-                posts::name.eq(&name_field),
-                posts::description.eq(&description_field),
-                posts::imgs.eq(&current_imgs),
-            ))
-            .returning((
-                posts::id,
-                posts::userid,
-                posts::name,
-                posts::description,
-                posts::imgs,
-            ))
-            .get_result::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn);
+    match updated_result {
+        Ok(updated_post) => {
+            let post_data = PostData {
+                id: updated_post.id,
+                userid: updated_post.userid,
+                name: updated_post.name,
+                description: updated_post.description,
+                imgs: updated_post.imgs,
+                created_at: updated_post.created_at,
+            };
 
-        match result {
-            Ok((id, userid, name, description, imgs)) => {
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "status": true,
-                    "message": "Post updated successfully",
-                    "post": {
-                        "id": id,
-                        "user_id": userid,
-                        "name": name,
-                        "description": description,
-                        "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<String>>(),
-                    }
-                }));
-            }
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": false,
-                    "message": "Failed to update post",
-                    "error": e.to_string()
-                }));
-            }
+            HttpResponse::Ok().json(serde_json::json!({
+                "status": true,
+                "message": "Post updated successfully",
+                "post": post_data
+            }))
         }
-    } else if !name_field.is_empty() {
-        let result = query_builder
-            .set((posts::name.eq(&name_field), posts::imgs.eq(&current_imgs)))
-            .returning((
-                posts::id,
-                posts::userid,
-                posts::name,
-                posts::description,
-                posts::imgs,
-            ))
-            .get_result::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn);
-
-        match result {
-            Ok((id, userid, name, description, imgs)) => {
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "status": true,
-                    "message": "Post updated successfully",
-                    "post": {
-                        "id": id,
-                        "user_id": userid,
-                        "name": name,
-                        "description": description,
-                        "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<String>>(),
-                    }
-                }));
-            }
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": false,
-                    "message": "Failed to update post",
-                    "error": e.to_string()
-                }));
-            }
-        }
-    } else if !description_field.is_empty() {
-        let result = query_builder
-            .set((
-                posts::description.eq(&description_field),
-                posts::imgs.eq(&current_imgs),
-            ))
-            .returning((
-                posts::id,
-                posts::userid,
-                posts::name,
-                posts::description,
-                posts::imgs,
-            ))
-            .get_result::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn);
-
-        match result {
-            Ok((id, userid, name, description, imgs)) => {
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "status": true,
-                    "message": "Post updated successfully",
-                    "post": {
-                        "id": id,
-                        "user_id": userid,
-                        "name": name,
-                        "description": description,
-                        "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<String>>(),
-                    }
-                }));
-            }
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": false,
-                    "message": "Failed to update post",
-                    "error": e.to_string()
-                }));
-            }
-        }
-    } else {
-        // Only images updated
-        let result = query_builder
-            .set(posts::imgs.eq(&current_imgs))
-            .returning((
-                posts::id,
-                posts::userid,
-                posts::name,
-                posts::description,
-                posts::imgs,
-            ))
-            .get_result::<(i32, i64, String, String, Vec<Option<String>>)>(&mut conn);
-
-        match result {
-            Ok((id, userid, name, description, imgs)) => {
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "status": true,
-                    "message": "Post updated successfully",
-                    "post": {
-                        "id": id,
-                        "user_id": userid,
-                        "name": name,
-                        "description": description,
-                        "imgs": imgs.into_iter().filter_map(|x| x).collect::<Vec<String>>(),
-                    }
-                }));
-            }
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": false,
-                    "message": "Failed to update post",
-                    "error": e.to_string()
-                }));
-            }
+        Err(e) => {
+            eprintln!("Database update failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": false,
+                "message": "Failed to update post",
+                "error": e.to_string()
+            }))
         }
     }
 }

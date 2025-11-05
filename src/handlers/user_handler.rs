@@ -4,39 +4,18 @@ use bcrypt::{DEFAULT_COST, hash, verify};
 use diesel::prelude::*;
 use futures_util::TryStreamExt as _;
 use jsonwebtoken::{EncodingKey, Header, encode};
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
 use std::collections::HashMap;
 use std::env;
 
 use crate::{
     db::Pool,
-    models::user::{NewUser, User},
+    models::user::{NewUser, User,LoginRequest,Claims,ChangePasswordForm,UserData},
     schema::users,
     utils::{file_upload::save_profile_image, validation::Validator},
 };
 
-#[derive(Serialize, Queryable)]
-pub struct UserData {
-    pub id: i64,
-    pub firstname: String,
-    pub lastname: String,
-    pub email: String,
-    pub ph: String,
-    pub profile: String,
-}
 
-#[derive(Serialize)]
-struct UsersResponse {
-    status: bool,
-    totalUsers: i64,
-    users: Vec<UserData>,
-}
-
-#[derive(Deserialize)]
-pub struct ChangePasswordForm {
-    pub old_password: String,
-    pub new_password: String,
-}
 
 pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> impl Responder {
     let mut profile_filename: Option<String> = None;
@@ -175,20 +154,10 @@ pub async fn register_user(pool: web::Data<Pool>, mut payload: Multipart) -> imp
     }
 }
 
-#[derive(Deserialize)]
-pub struct LoginRequest {
-    pub email: String,
-    pub password: String,
-}
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Claims {
-    pub id: i64,
-    pub email: String,
-    pub firstname: String,
-    pub lastname: String,
-    pub exp: usize,
-}
+
+
+
 
 pub async fn login_user(pool: web::Data<Pool>, body: web::Json<LoginRequest>) -> impl Responder {
     let mut conn = pool.get().expect("DB connection error");
@@ -246,6 +215,13 @@ pub async fn login_user(pool: web::Data<Pool>, body: web::Json<LoginRequest>) ->
     }))
 }
 
+#[derive(Serialize)]
+pub struct UsersResponse {
+    status: bool,
+    total_users: i64,
+    users: Vec<UserData>,
+}
+
 pub async fn get_all_users(
     pool: web::Data<Pool>,
     query: web::Query<HashMap<String, String>>,
@@ -280,7 +256,7 @@ pub async fn get_all_users(
 
     HttpResponse::Ok().json(UsersResponse {
         status: true,
-        totalUsers: total_users,
+        total_users: total_users,
         users: user_list,
     })
 }
@@ -354,7 +330,6 @@ pub async fn update_user(
                 return HttpResponse::BadRequest()
                     .json(serde_json::json!({ "status": false, "message": e }));
             }
-
             let mut bytes = Vec::new();
             while let Some(chunk) = field.try_next().await.unwrap() {
                 bytes.extend_from_slice(&chunk);
@@ -408,6 +383,7 @@ pub async fn update_user(
         .first::<User>(&mut conn)
         .optional()
         .expect("DB check failed");
+    
     if email_exists.is_some() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "status": false,

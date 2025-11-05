@@ -1,4 +1,5 @@
 /target/
+/files
 Cargo.lock
 *.exe
 *.pdb
